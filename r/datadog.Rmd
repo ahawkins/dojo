@@ -1,0 +1,223 @@
+---
+title: "Kata: Pull Data from Datadog via API"
+output: html_document
+date: "2023-05-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(dplyr)
+library(glue)
+library(httr)
+library(purrr)
+```
+
+# Pull Raw JSON from the Metric API
+
+Use the `httr` library to make a metric query request. This returns data shaped
+like (only relevant data is shown):
+
+```json
+{
+  "series": {
+    "pointlist": [
+      [ timestampInMilliseconds, number ]
+    ]
+  }
+```
+
+This step shows how to make the request. Data frames will be created in the
+following steps.
+
+```{r getJSON, include=TRUE}
+getMetricData <- function(metric = NULL, to = NULL, from = NULL) {
+  apiKey <- Sys.getenv("DATADOG_API_KEY")
+  applicationKey <- Sys.getenv("DATADOG_APP_KEY")
+
+  if(apiKey == "" || applicationKey == "") {
+    stop("DATADOG_API_KEY or DATADOG_APP_KEY missing")
+  }
+
+  r <- GET("https://api.datadoghq.com/api/v1/query",
+           query = list(
+              query = glue('sum:{metric}.as_count().rollup(sum, 86400)'),
+              from = as.integer(from),
+              to = as.integer(to)
+            ),
+           add_headers("DD-API-KEY" = apiKey, "DD-APPLICATION_KEY" = applicationKey)
+        )
+
+  stop_for_status(r)
+
+  json <- content(r)
+}
+
+json <- getMetricData(
+  metric = "trace.web.request.errors.by_http_status{http.status_class:5xx,env:prod}",
+  from = ymd_hms("2023-02-15T00:00:00", tz = "America/New_York"),
+  to = ymd_hms("2023-03-15T00:00:00", tz = "America/New_York")
+)
+
+summary(json)
+```
+
+# Iteration 0: Parse JSON into a Data Frame
+
+This is a simple approach that a beginner programmer may take. It uses a loop to
+"map" over the `pointlist`.
+
+```{r, dfIteration0, include = TRUE}
+
+counts <- c()
+days <- c()
+
+for(i in 1:length(json$series[[1]]$pointlist)) {
+  days <- append(days, as_date(as_datetime(json$series[[1]]$pointlist[i][[1]][[1]] / 1000)))
+  counts <- append(counts, json$series[[1]]$pointlist[i][[1]][[2]])
+}
+
+dfIteration0 <- data.frame(Date = days, Total = counts)
+
+ggplot(dfIteration0, aes(x = Date, y = Total)) + geom_col()
+```
+
+# Iteration 1: Parse JSON using purrr
+
+Improvement is possible by adopting a functional style. `purrr` provides
+functions for working (these cumbersome) JSON representations. It goes like
+this:
+
+1. Pluck the `series.pointlist` object
+2. `map` over it return a named list with `Date` and `Total` values
+3. `map` over it convert the lists to data frames
+4. Combine the results into a single data frame
+
+```{r, dfIteration1, include = TRUE}
+dfIteration1 <- json %>%
+  pluck("series", 1, "pointlist") %>%
+  map(\(x) list(Date = as_datetime(x[[1]][[1]] / 1000), Total = x[[2]][[1]])) %>%
+  map(bind_rows) %>%
+  list_rbind
+
+ggplot(dfIteration1, aes(x = Date, y = Total)) + geom_col()
+```
+
+# Iteration 2: Pull Data using Relative Dates
+
+Data from Datadog will be more useful if notebooks contain relative dates.
+`lubridate` provides the necessary functions.
+
+```{r dfIteration2, include = TRUE}
+json <- getMetricData(
+  metric = "trace.web.request.errors.by_http_status{http.status_class:5xx,env:prod}",
+  from = now() - days(60),
+  to = now()
+)
+
+dfIteration2 <- json %>%
+  pluck("series", 1, "pointlist") %>%
+  map(\(x) list(Date = as_datetime(x[[1]][[1]] / 1000), Total = x[[2]][[1]])) %>%
+  map(bind_rows) %>%
+  list_rbind
+
+ggplot(dfIteration2, aes(x = Date, y = Total)) + geom_col()
+```
+
+# Iteration 3: Create Weekly, Daily, or Monthly Rollups
+
+Pior iterations used a fixed daily rollup. Nicely for initial practice, but
+constraining when using relative (or dynamic dates). Let's refactor the function
+to take a rollup argument. This time it will also return a data frame.
+
+```{r, iteration3, include = TRUE}
+getMetricRollup <- function(metric = NULL, rollup = NULL, to = NULL, from = NULL) {
+  apiKey <- Sys.getenv("DATADOG_API_KEY")
+  applicationKey <- Sys.getenv("DATADOG_APP_KEY")
+
+  if(apiKey == "" || applicationKey == "") {
+    stop("DATADOG_API_KEY or DATADOG_APP_KEY missing")
+  }
+
+  r <- GET("https://api.datadoghq.com/api/v1/query",
+           query = list(
+              query = glue('sum:{metric}.as_count().rollup(sum, {rollup})'),
+              from = as.integer(from),
+              to = as.integer(to)
+            ),
+           add_headers("DD-API-KEY" = apiKey, "DD-APPLICATION_KEY" = applicationKey)
+        )
+
+  stop_for_status(r)
+
+  content(r) %>%
+    pluck("series", 1, "pointlist") %>%
+    map(\(x) list(Date = as_datetime(x[[1]][[1]] / 1000), Total = x[[2]][[1]])) %>%
+    map(bind_rows) %>%
+    list_rbind
+}
+
+dailyErrors <- getMetricRollup(
+  metric = "trace.web.request.errors.by_http_status{http.status_class:5xx,env:prod}",
+  rollup = 60 * 60 * 24,
+  from = now() - days(30),
+  to = now()
+)
+
+ggplot(dailyErrors, aes(x = Date, y = Total)) + geom_col()
+
+weeklyErrors <- getMetricRollup(
+  metric = "trace.web.request.errors.by_http_status{http.status_class:5xx,env:prod}",
+  rollup = 60 * 60 * 24 * 7,
+  from = now() - months(3),
+  to = now()
+)
+
+ggplot(weeklyErrors, aes(x = Date, y = Total)) + geom_col()
+
+monthlyErrors <- getMetricRollup(
+  metric = "trace.web.request.errors.by_http_status{http.status_class:5xx,env:prod}",
+  rollup = 60 * 60 * 24 * 30,
+  from = now() - months(12),
+  to = now()
+)
+
+ggplot(monthlyErrors, aes(x = Date, y = Total)) + geom_col()
+```
+
+# Iteration 4: Split Daily and Weekly View
+
+Different time scales obscure the other. Create a visual that shows a rollup of
+the past 30 days and weeks of the same metric.
+
+Here the `getMetricRollup` function is used to query the separate data sets,
+then they are combined into a single data frame with a `View` column. The `View`
+is a factor. That's used with `facet_wrap` to put charts side-by-side.
+`facet_wrap` uses the `free_x` option to allow different X-axis spacing per chart.
+
+```{r iteration4, include = TRUE}
+thirtyDayErrors <- getMetricRollup(
+  metric = "trace.web.request.errors.by_http_status{http.status_class:5xx,env:prod}",
+  rollup = 60 * 60 * 24,
+  from = now() - days(30),
+  to = now()
+) %>%
+  mutate(View = "Daily", Date = as_date(Date))
+
+thirtyWeekErrors <- getMetricRollup(
+  metric = "trace.web.request.errors.by_http_status{http.status_class:5xx,env:prod}",
+  rollup = 60 * 60 * 24 * 7,
+  from = now() - weeks(30),
+  to = now()
+) %>%
+  mutate(View = "Weekly", Date = as_date(Date))
+
+combinedDailyWeekly <- rbind(thirtyDayErrors, thirtyWeekErrors)
+
+ggplot(combinedDailyWeekly, aes(x = Date, y = Total)) +
+  geom_col() +
+  facet_wrap(vars(View), scales = "free_x")
+```

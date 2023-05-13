@@ -1,0 +1,132 @@
+---
+title: "Kata: Produce a Nicely Colored Control Chart"
+output: html_document
+date: "2023-05-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tibble)
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(dplyr)
+
+# Data taken from a chapter in "Understanding Statistical Process Control"
+# by Donald Wheeler. It has been modified to create out-of-control points.
+
+freight <- tribble(
+  ~Month, ~TotalShipments,
+  1, 4266,
+  2, 4440,
+  3, 4896,
+  4, 4019,
+  5, 4101,
+  6, 3755,
+  7, 5068,
+  8, 4040,
+  9, 4038,
+  10, 3275,
+  11, 4059,
+  12, 503,
+  13, 5311,
+  14, 3977,
+  15, 4050,
+  16, 4546,
+  17, 4658,
+  18, 4357,
+  19, 9585,
+  20, 4196,
+)
+```
+
+# Coloring Points
+
+Add columns for the Upper & Lower Natural Process Limits to the data frame.
+Then, add a `Violation` column. The value is determined by the natural process
+limit columns. If the point is out-of-control (i.e. violationg the natural
+process limits), then they will be colored red. Other points will be black.
+
+The `Violation` column may be used as an R factor. Explicit color values for the
+factor (`TRUE` and `FALSE`) are set with `scale_color_manual`.
+
+```{r coloredPoints, include=TRUE}
+freight <- freight %>%
+  mutate(
+    UNPL = mean(TotalShipments) + 2.66 * mean(abs(diff(freight$TotalShipments))),
+    LNPL = mean(TotalShipments) - 2.66 * mean(abs(diff(freight$TotalShipments))),
+    Mean = mean(TotalShipments)
+  ) %>%
+  mutate(Violation = TotalShipments > UNPL | TotalShipments < LNPL)
+
+ggplot(freight, aes(x = Month, y = TotalShipments)) +
+  geom_line() +
+  geom_point(aes(color = factor(Violation)), show.legend = FALSE) +
+  geom_hline(aes(yintercept = UNPL), linetype = "dashed") +
+  geom_hline(aes(yintercept = LNPL), linetype = "dashed") +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  scale_y_continuous(labels = label_number(big.mark = ",")) +
+  scale_x_continuous(minor_breaks = NULL, breaks = freight$Month) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red"))
+```
+
+# Adding a Ribbon
+
+Control charts typicall use dashed lines for the upper and lower control limits.
+This kata replaces that with a ribbon (a horizontal band across the chart). This
+may be more visualy appealing.
+
+`geom_ribbon` replaces `geom_hline` in the previous example.
+
+```{r withRibbon, include=TRUE}
+ggplot(freight, aes(x = Month, y = TotalShipments)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = LNPL, ymax = UNPL), fill = "blue", alpha = 0.2) +
+  geom_point(aes(color = factor(Violation)), show.legend = FALSE) +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  scale_y_continuous(labels = label_number(big.mark = ",")) +
+  scale_x_continuous(minor_breaks = NULL, breaks = freight$Month) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red"))
+```
+
+# Increasing the Size of Out-of-Control Points
+
+Using different colors for points out-of-control is great. This may be enhanced
+by dynamically setting the size according to the factor.
+
+Here `scale_size_manual` makes out-of-control points twice as large.
+
+```{r withSize, include=TRUE}
+ggplot(freight, aes(x = Month, y = TotalShipments)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = LNPL, ymax = UNPL), fill = "blue", alpha = 0.2) +
+  geom_point(aes(color = factor(Violation), size = factor(Violation)), show.legend = FALSE) +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  scale_y_continuous(labels = label_number(big.mark = ",")) +
+  scale_x_continuous(minor_breaks = NULL, breaks = freight$Month) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+  scale_size_manual(values = c("FALSE" = 2, "TRUE" = 4))
+```
+
+# Changing Shape of Out-of-Control Points
+
+We can also change the size, color, and shape of the point. Here
+`scale_shape_manual` turns the out-of-control points into `X` shapes and others
+as `o` shapes.
+
+Here's a link to [the shape
+codes](https://blog.albertkuo.me/post/point-shape-options-in-ggplot/)
+
+```{r withShape, include=TRUE}
+ggplot(freight, aes(x = Month, y = TotalShipments)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = LNPL, ymax = UNPL), fill = "blue", alpha = 0.2) +
+  geom_point(aes(color = factor(Violation), size = factor(Violation), shape = factor(Violation)), show.legend = FALSE) +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  scale_y_continuous(labels = label_number(big.mark = ",")) +
+  scale_x_continuous(minor_breaks = NULL, breaks = freight$Month) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+  scale_size_manual(values = c("FALSE" = 2, "TRUE" = 6)) +
+  scale_shape_manual(values = c("FALSE" = 16, "TRUE" = 4))
+```

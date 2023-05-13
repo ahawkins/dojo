@@ -1,0 +1,70 @@
+---
+title: "Kata: Produce a XmR Chart"
+output: html_document
+date: "2023-05-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tibble)
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(dplyr)
+
+freight <- tribble(
+  ~Month, ~TotalShipments,
+  1, 7266,
+  2, 4440,
+  3, 4896,
+  4, 6019,
+  5, 4101,
+  6, 2755,
+  7, 5068,
+  8, 4040,
+  9, 4038,
+  10, 5275,
+  11, 4059,
+  12, 113,
+  13, 5311,
+  14, 2977,
+  15, 4050,
+  16, 5546,
+  17, 5658,
+  18, 7357,
+  19, 7585,
+  20, 5196,
+)
+```
+
+## Setup the Data
+
+```{r prep, include=TRUE}
+
+freight.x <- freight
+freight.mr <- freight %>%
+  mutate(MR = c(NA, abs(diff(freight$TotalShipments))))
+freight.xBar <- mean(freight$TotalShipments)
+freight.mBar <- mean(abs(diff(freight$TotalShipments)))
+freight.unpl <- freight.xBar + 2.66 * freight.mBar
+freight.lnpl <- freight.xBar - 2.66 * freight.mBar
+freight.url <- 3.268 * freight.mBar
+
+ggplot(freight.x, aes(x = Month, y = TotalShipments)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = freight.xBar) +
+  geom_hline(yintercept = freight.unpl, linetype = "dashed") +
+  geom_hline(yintercept = freight.lnpl, linetype = "dashed") +
+  scale_y_continuous(labels = label_number(big.mark = ",")) +
+  scale_x_continuous(minor_breaks = NULL, breaks = freight$Month)
+
+ggplot(freight.mr, aes(x = Month, y = MR)) +
+  geom_line(na.rm = TRUE) +
+  geom_point(na.rm = TRUE) +
+  geom_hline(yintercept = freight.mBar) +
+  geom_hline(yintercept = freight.url, linetype = "dashed") +
+  scale_y_continuous(labels = label_number(big.mark = ",")) +
+  scale_x_continuous(minor_breaks = NULL, breaks = freight$Month)
+```
