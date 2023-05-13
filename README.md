@@ -1,5 +1,7 @@
 # Dojo
 
+![My Dojo](dojo.jpg)
+
 A place for my programming katas, exercises, and practice.
 
 ## R
