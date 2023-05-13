@@ -9,5 +9,7 @@ module.exports = async (stagedFiles) => {
 
 	commands.push(`prettier --write ${stagedFiles.join(" ")}`);
 
+	commands.push(`prettier --check ${stagedFiles.join(" ")}`);
+
 	return commands;
 };
