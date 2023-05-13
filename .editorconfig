@@ -1,0 +1,10 @@
+[*]
+charset = utf-8
+insert_file_newline = true
+end_of_line = lf
+max_line_length = 80
+indent_style = tab
+
+[*.Rmd]
+indent_style = space
+indent_size = 2
