@@ -1,0 +1,347 @@
+---
+title: "Kata: Apply SPC to Datadog SLOs"
+output: html_document
+date: "2023-05-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(dplyr)
+library(glue)
+library(httr)
+library(purrr)
+```
+
+# Iteration 0: Pull SLI history from the API
+
+Use the `httr` library to make an [SLO history request](https://docs.datadoghq.com/api/latest/service-level-objectives/#get-an-slos-history).
+This returns data shaped like (only relevant data is shown):
+
+```json
+{
+  "data": {
+    "series": {
+      "numerator": {
+        "values": [ count, ... ],
+      },
+      "denominator": {
+        "values": [ count, ... ],
+      },
+      "times": [ timestampInMilliseconds, ... ]
+    }
+  }
+}
+```
+
+This iteration show how to make the request. Data frames will be created in the
+following iterations.
+
+```{r , include=TRUE}
+getSLOHistory <- function(slo = NULL, to = NULL, from = NULL) {
+  apiKey <- Sys.getenv("DATADOG_API_KEY")
+  applicationKey <- Sys.getenv("DATADOG_APP_KEY")
+
+  if (apiKey == "" || applicationKey == "") {
+    stop("DATADOG_API_KEY or DATADOG_APP_KEY missing")
+  }
+
+  r <-
+    GET(
+      glue("https://api.datadoghq.com/api/v1/slo/{slo}/history"),
+      query = list(from_ts = as.integer(from),
+                   to_ts = as.integer(to)),
+      add_headers("DD-API-KEY" = apiKey, "DD-APPLICATION_KEY" = applicationKey)
+    )
+
+  stop_for_status(r)
+
+  json <- content(r)
+}
+
+json <- getSLOHistory(
+  slo = "5439926203625d579e0f33d44afcad49",
+  from = now() - days(60),
+  to = now()
+)
+
+summary(json)
+```
+
+# Iteration 1: Parse into a Dataframe
+
+The useful data is in `data.series.times`, `data.series.numerator.values`,
+and `data.series.denominator.values`. Each is a list. The three may be combined
+into a data frame. Then the `SLI` value is calculated.
+
+This iteration uses the `purrr` for iteration and manipulation.
+
+```{r, iteration1, include = TRUE}
+timestamps <- json %>%
+  pluck("data", "series", "times") %>%
+  map(\(x) as_date(as_datetime(x / 1000))) %>%
+  list_c
+
+numerators <- json %>%
+  pluck("data", "series", "numerator", "values") %>%
+  list_c
+
+denominators <- json %>%
+  pluck("data", "series", "denominator", "values") %>%
+  list_c
+
+history <- data.frame(
+  Date = timestamps,
+  Numerator = numerators,
+  Denominator = denominators
+) %>%
+  mutate(SLI = Numerator / Denominator)
+```
+
+# Iteration 2: Graph the SLI
+
+Create a simple line plot with the Date on the X axis and the
+SLI (as percentage) on the Y axis. Add a blue line for the SLO. How many points
+meet the SLO?
+
+```{r, iteration2, include = TRUE}
+ggplot(history, aes(x = Date, y = SLI)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = 0.9999, linetype = "solid", color = "blue") +
+  scale_y_continuous(labels = label_percent()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+# Iteration 3: Create Control Chart
+
+See the other SPC katas for example. This code calculates the upper and lower
+natural process limits using SPC constants. They are added to the chart in red,
+along with the mean in black.
+
+This demonstrates what we can expect from this process in it's current
+condition.
+
+```{r iteration3, include = TRUE}
+history <- history %>%
+  mutate(
+    UNPL = mean(SLI) + 2.66 * mean(abs(diff(SLI))),
+    LNPL = mean(SLI) - 2.66 * mean(abs(diff(SLI))),
+    Mean = mean(SLI)
+  )
+
+ggplot(history, aes(x = Date, y = SLI)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(labels = label_percent()) +
+  geom_hline(aes(yintercept = UNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = LNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  geom_hline(yintercept = 0.9999, linetype = "solid", color = "blue") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+How far is the blue line from the control limits (red dashed lines)?
+
+# Iteration 4: Color Out of Control Points
+
+Add a column for points outside the control limits. Use that as an factor to
+manually color points red (out of control) and black (under control).
+
+```{r iteration3, include = TRUE}
+history <- history %>%
+  mutate(Violation = SLI > UNPL | SLI < LNPL)
+
+ggplot(history, aes(x = Date, y = SLI)) +
+  geom_line() +
+  geom_point(aes(color = factor(Violation)), show.legend = FALSE) +
+  geom_hline(aes(yintercept = UNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = LNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  geom_hline(yintercept = 0.9999, linetype = "solid", color = "blue") +
+  scale_y_continuous(labels = label_percent()) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+# Iteration 5: Create a Weekly Rollup
+
+Datadog coaxes you to look at 7, 30, and 90 day SLOs. The API provides daily
+values. Use the `purrr` to group points by the week, then calculate the SLI for
+each week. `foor_date` calculates "start of the week on Monday" for each date.
+
+```{r iteration5, include = TRUE}
+weeklyHistory <- history %>%
+  group_by(Week = floor_date(Date, unit = "week", week_start = 1)) %>%
+  summarise(SLI = sum(Numerator) / sum(Denominator)) %>%
+  mutate(
+    UNPL = mean(SLI) + 2.66 * mean(abs(diff(SLI))),
+    LNPL = mean(SLI) - 2.66 * mean(abs(diff(SLI))),
+    Mean = mean(SLI)
+  ) %>%
+  mutate(Violation = SLI > UNPL | SLI < LNPL)
+
+ggplot(weeklyHistory, aes(x = Week, y = SLI)) +
+  geom_line() +
+  geom_point(aes(color = factor(Violation)), show.legend = FALSE) +
+  geom_hline(aes(yintercept = UNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = LNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  geom_hline(yintercept = 0.9999, linetype = "solid", color = "blue") +
+  scale_y_continuous(labels = label_percent()) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+# Iteration 6: Create a Heads-up-Display of Mulitple SLOs
+
+Now scale the approach to multiple SLOs. The work in previous iterations is
+refactored into a single function. The function takes an SLO id and timestamps,
+then returns a weekly rollup.
+
+These may be combined into a single dataframe then "split graph" using
+`facet_wrap`. This creates a nice view of many SLOs at once.
+
+This time, add a blue line for the SLO itself. How many points meet the SLO?
+
+```{r iteration5, include = TRUE}
+getSLOWeeklyHistory <- function(slo = NULL, to = NULL, from = NULL) {
+  apiKey <- Sys.getenv("DATADOG_API_KEY")
+  applicationKey <- Sys.getenv("DATADOG_APP_KEY")
+
+  if(apiKey == "" || applicationKey == "") {
+    stop("DATADOG_API_KEY or DATADOG_APP_KEY missing")
+  }
+
+  r <-
+    GET(
+      glue("https://api.datadoghq.com/api/v1/slo/{slo}/history"),
+      query = list(from_ts = as.integer(from),
+                   to_ts = as.integer(to)),
+      add_headers("DD-API-KEY" = apiKey, "DD-APPLICATION_KEY" = applicationKey)
+    )
+
+  stop_for_status(r)
+
+  json <- content(r)
+
+  timestamps <- json %>%
+    pluck("data", "series", "times") %>%
+    map(\(x) as_date(as_datetime(x / 1000))) %>%
+    list_c
+
+  numerators <- json %>%
+    pluck("data", "series", "numerator", "values") %>%
+    list_c
+
+  denominators <- json %>%
+    pluck("data", "series", "denominator", "values") %>%
+    list_c
+
+  history <- data.frame(
+      Date = timestamps,
+      Numerator = numerators,
+      Denominator = denominators
+    ) %>%
+    mutate(SLI = Numerator / Denominator) %>%
+    group_by(Week = floor_date(Date, unit = "week", week_start = 1)) %>%
+    summarise(SLI = sum(Numerator) / sum(Denominator)) %>%
+    mutate(
+      UNPL = mean(SLI) + 2.66 * mean(abs(diff(SLI))),
+      LNPL = mean(SLI) - 2.66 * mean(abs(diff(SLI))),
+      Mean = mean(SLI)
+    ) %>%
+    mutate(Violation = SLI > UNPL | SLI < LNPL)
+}
+
+# This repeated structured could be refactored into some sort of Key/Value map
+# connected to a map and reduction function. Something for a separate kata.
+serviceA <- getSLOWeeklyHistory(
+  slo = "5439926203625d579e0f33d44afcad49",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service A"
+  )
+
+serviceB <- getSLOWeeklyHistory(
+  slo = "bc5d0ee9a9955dcb8b5c9a53ec2ac8c3",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service B"
+  )
+
+serviceC <- getSLOWeeklyHistory(
+  slo = "3351084b596b5949ad81b719b4d00afe",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service C"
+  )
+
+serviceD <- getSLOWeeklyHistory(
+  slo = "da5550ca13bc5b1cb13d383ab8fd4b6d",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service D"
+  )
+
+serviceE <- getSLOWeeklyHistory(
+  slo = "7bc3e8a86b4255619d4ae3303a196717",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service E"
+  )
+
+serviceF <- getSLOWeeklyHistory(
+  slo = "1b97b3eaf254528c8fc0455f81b706c8",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service F"
+  )
+
+serviceG <- getSLOWeeklyHistory(
+  slo = "f68436d700275ff0b4453892146878df",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service G"
+  )
+
+serviceH <- getSLOWeeklyHistory(
+  slo = "5855af30c4595371a01c009bb7c5af6e",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service H"
+  )
+
+serviceI <- getSLOWeeklyHistory(
+  slo = "ee92ccb93a61518ebdd3e57b4b5a6cab",
+  from = now() - days(90),
+  to = now()
+  ) %>% mutate(
+    Service = "Service I"
+  )
+
+combinedWeekly <- rbind(serviceA, serviceB, serviceC, serviceD, serviceE, serviceF, serviceG, serviceH, serviceI)
+
+ggplot(combinedWeekly, aes(x = Week, y = SLI)) +
+  geom_line() +
+  geom_point(aes(color = factor(Violation)), show.legend = FALSE) +
+  geom_hline(aes(yintercept = UNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = LNPL), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = Mean), linetype = "solid") +
+  geom_hline(yintercept = 0.9999, linetype = "solid", color = "blue") +
+  scale_y_continuous(labels = label_percent()) +
+  scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+  facet_wrap(vars(Service), scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
