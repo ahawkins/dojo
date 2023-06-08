@@ -1,0 +1,229 @@
+---
+title: "Kata: Tidy a Spreadsheet for Plotting"
+output: html_document
+date: "2023-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(glue)
+```
+
+# Background
+
+This kata covers common tasks for working columnar reports provided as CSVs.
+Columns are typically added for dates and rows for various items. Data may be
+missing, malformed, or parsed incorrectly. There may be entire rows or columns
+with empty data.
+
+The data represents usage per project over the last year. Produce a stacked bar
+chart for the top N projects.
+
+# Increment 1: Parsing the Data
+
+## Iteration 0: Reading CSV
+
+Use the build in `read.csv` function. This function returns a Data frame. That's
+the base for further manipulations.
+
+```{r iteration0, include = TRUE}
+usage <- read.csv('circleci_usage.csv')
+
+summary(usage)
+```
+
+This creates a few challenges:
+
+1. Numbers are parsed as strings (they contain `,` seperators)
+2. Header columns are named strangely (some now include `X`)
+3. There are `NA` columns (seemingly dynamically created by the parser)
+4. There is a useless second row (seemingly used as a header)
+
+The next steps is to clean the data needed to pivot the table.
+
+## Iteration 1: Remove Junk Rows & Columns
+
+Enter `dplyr` for manipulating the data frame. `filter()` removes the header
+row using `row_number()`. `rename` will fix the first missing column name.
+`select()` limits data to a set of
+columns. That will remove the known junk `Credit.Usage.Activity.Dt.Month`
+column. `select()` may also be used with the `matches()` helper for regex.
+The second `select()` call removes all the empty columns on the right.
+
+```{r iteration1, include = TRUE}
+usage1 <- usage %>%
+  filter(row_number() != 1) %>%
+  rename(Project = X) %>%
+  select(-Credit.Usage.Activity.Dt.Month) %>%
+  select(-matches("X\\.\\d+$"))
+
+summary(usage1)
+```
+
+## Iteration 2: Pivot the Table
+
+Change the date columns into row entry. Enter `tidyr`.
+
+```{r iteration2, include = TRUE}
+usage2 <- usage1 %>%
+  pivot_longer(!Project, names_to = "Date", values_to = "Usage")
+
+summary(usage2)
+```
+
+## Iteration 3: Parse Dates
+
+The current data has a `Date` column with values like `X2023.05`. Enter `tidyr`.
+`tidyr` includes functions for splitting this data into component parts. Then,
+the components may be used to create a date.
+
+`seperate_wider_position()` can tokenize a column into multiple columns based
+on position. The first character (`X`) is ignored (not given a mapping). The
+next four are assigned to `Year`. The next character (`.`) is ignored. The
+next two characters are assigned to `Month`.
+
+`mutate()` adds a new column by parsing the two with `lubridate`. The temporary
+`Year` and `Month` columns are discarded with `select()`
+
+```{r iteration3, include = TRUE}
+usage3 <- usage2 %>%
+  separate_wider_position(Date, c(1, Year = 4, 1, Month = 2)) %>%
+  mutate(Date = ym(glue("{Year}.{Month}"))) %>%
+  select(c(Project, Date, Usage))
+
+summary(usage3)
+```
+
+## Iteration 4: Parse Numbers
+
+The `Usage` columns contains human readable strings and empty strings for zero.
+Enter `readr`. It includes `parse_number()` which works perfectly for this case.
+Empty values become `NA`. `tidyr` includes the `replace_na` function.
+
+```{r iteration4, include = TRUE}
+usage4 <- usage3 %>%
+  mutate(Usage = parse_number(Usage)) %>%
+  replace_na(list(Usage = 0))
+
+summary(usage4)
+```
+
+Tada! Finally, a data set fit for plotting!
+
+# Increment 2: The Bar Chart
+
+## Iteration 5: A stacked bar chart
+
+The simple approach is just creating the bar chart per project.
+
+```{r iteration5, include = TRUE}
+ggplot(usage4, aes(x = Date, y = Usage, fill = Project)) +
+  geom_bar(stat = "identity")
+```
+
+Unfortunately, this is completely unusable due to the total number of projects.
+Running this R studio produces a confusing chart. It appears to only display
+the legend. Open the output in a new window, then make the window bigger. Then,
+the full graph is visible.
+
+Something must be done to limit the number of projects.
+
+## Iteration 6: Using the Top 5
+
+The `group_by()` and `rank()` functions work here. `group_by()` for grouping
+each `Date`, then `rank()` descending on `Usage`. Then use `filter` to select
+the number of items to show.
+
+```{r iteration6, include = TRUE}
+usage6 <- usage4 %>%
+  group_by(Date) %>%
+  mutate(Rank = rank(-Usage, ties.method = "min")) %>%
+  filter(Rank <= 5)
+
+ggplot(usage6, aes(x = Date, y = Usage, fill = Project)) +
+  geom_bar(stat = "identity")
+```
+
+## Iteration 7: Labeling the Y Axis
+
+The `ggplot` defaults to scientific notation for such large values. The `scales`
+package includes useful functions for generating labels. The `label_comma()`
+function generates human readable numbers with a comma for us Americans.
+
+```{r iteration7, include = TRUE}
+ggplot(usage6, aes(x = Date, y = Usage, fill = Project)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = label_comma())
+```
+
+## Iteration 8: A Porportional Chart
+
+The stacked bar char is great to see the totals. It's useful to view the
+relative proportion of each project. Luckily, `geom_bar` can do this
+out-of-the-box with `position = "fill"`. `geom_bar` will calculate the
+proportion and use a 0-1 y-axis. The `scales` package includes a function for
+labeling percentages, so use that for the y axis.
+
+```{r iteration8, include = TRUE}
+ggplot(usage6, aes(x = Date, y = Usage, fill = Project)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = label_percent())
+```
+
+## Iteration 9: Prettify
+
+The default visuals are OK, though difficult to read with this data set. Add an
+outline to each bar and change the color. Setting `color` on `geom_bar` adds a
+the outline. That improves visibility of each project inside the bar. Second,
+use a different color palette for the `fill`. There are many available.
+I chose Brewer with `Set3` because of the number of factors. Not all palettes
+have the same number of colors.
+
+```{r iteration9, include = TRUE}
+ggplot(usage6, aes(x = Date, y = Usage, fill = Project)) +
+  geom_bar(stat = "identity", position = "fill", color = "black") +
+  scale_y_continuous(labels = label_percent()) +
+  scale_fill_brewer(palette = "Set3")
+```
+
+Now, much better.
+
+## Iteration 10: Grouping Lower Ranks
+
+There is one last thing to do. There are 40 plus Projects in the dataset.
+Limiting the chart to the top 5 is mandatory though it excludes the rest. This
+is an inaccurate presentation of the data. A better solution is lump the lower
+ranks into an "other" category. This way the total usage is accurate without
+the added noise from tens of small projects.
+
+Creating the "other" project starts of like the Ranking iteration. Then,
+any row with a `Rank` higher than 5 has its `Project` set to `other`. Next, the
+data is grouped by `Date` and `Project`. Groups are summarized to the sum of
+`Usage`.
+
+Practically speaking, Project ranks 1-5 will have a group with size 1. The
+`summary` function here is virtually a no-op. It only matters on lower ranks
+that will have multiple rows in the group.
+
+Done!
+
+```{r iteration10, include = TRUE}
+usage10 <- usage4 %>%
+  group_by(Date) %>%
+  mutate(Rank = rank(-Usage, ties.method = "min")) %>%
+  mutate(Project = ifelse(Rank > 5, "other", Project)) %>%
+  group_by(Date, Project) %>%
+  summarize(Usage = sum(Usage), .groups = "drop")
+
+ggplot(usage10, aes(x = Date, y = Usage, fill = Project)) +
+  geom_bar(stat = "identity", position = "fill", color = "black") +
+  scale_y_continuous(labels = label_percent()) +
+  scale_fill_brewer(palette = "Set3")
+```
